@@ -16,6 +16,9 @@ apt-get "${apt_opts[@]}" update
 DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 ufw qemu-guest-agent
 systemctl enable --now docker qemu-guest-agent
 install -d -m 0755 /opt/ha /opt/ha/deploy/pve /etc/ha
+install -m 0644 /opt/ha/deploy/pve/sshd-keyonly.conf /etc/ssh/sshd_config.d/00-ha-keyonly.conf
+sshd -t
+systemctl reload ssh
 
 ufw --force reset
 ufw default deny incoming

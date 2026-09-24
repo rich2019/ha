@@ -78,6 +78,7 @@ MySQL 初始化完成后，在每台 VM 运行 `bash /opt/ha/deploy/pve/setup-se
 - 半同步检查：source 状态 ON、2 个副本客户端、确认过的事务计数大于 0；备库复制 IO/SQL 线程正常。
 - 停止当前主库 MySQL 容器后，收到节点异常告警和一次自动切换 dry-run 事件，没有提升副本；重新启动后收到恢复告警。告警接收器仅用于本次验证，事件暂存于内存。
 - 自动倒换已在测试结束时关闭。当前 Etcd Leader 为 `ha-db-2`；当前主库也是 `ha-db-2`。
+- VM SSH 仅接受公钥认证；Controller 管理 API 绑定回环地址，管理变更会拒绝非 Etcd Leader 请求。
 
 实测命令：
 
