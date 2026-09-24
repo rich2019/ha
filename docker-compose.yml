@@ -1,0 +1,110 @@
+services:
+  etcd-1:
+    image: quay.io/coreos/etcd:v3.5.15
+    command: >-
+      /usr/local/bin/etcd --name etcd-1 --data-dir /etcd-data
+      --advertise-client-urls http://etcd-1:2379 --listen-client-urls http://0.0.0.0:2379
+      --initial-advertise-peer-urls http://etcd-1:2380 --listen-peer-urls http://0.0.0.0:2380
+      --initial-cluster etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      --initial-cluster-state new --initial-cluster-token ha-dev
+    networks: [ha]
+  etcd-2:
+    image: quay.io/coreos/etcd:v3.5.15
+    command: >-
+      /usr/local/bin/etcd --name etcd-2 --data-dir /etcd-data
+      --advertise-client-urls http://etcd-2:2379 --listen-client-urls http://0.0.0.0:2379
+      --initial-advertise-peer-urls http://etcd-2:2380 --listen-peer-urls http://0.0.0.0:2380
+      --initial-cluster etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      --initial-cluster-state new --initial-cluster-token ha-dev
+    networks: [ha]
+  etcd-3:
+    image: quay.io/coreos/etcd:v3.5.15
+    command: >-
+      /usr/local/bin/etcd --name etcd-3 --data-dir /etcd-data
+      --advertise-client-urls http://etcd-3:2379 --listen-client-urls http://0.0.0.0:2379
+      --initial-advertise-peer-urls http://etcd-3:2380 --listen-peer-urls http://0.0.0.0:2380
+      --initial-cluster etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      --initial-cluster-state new --initial-cluster-token ha-dev
+    networks: [ha]
+  mysql-1:
+    image: mysql:8.0.39
+    command: ["--server-id=1", "--log-bin=mysql-bin", "--binlog-format=ROW", "--gtid-mode=ON", "--enforce-gtid-consistency=ON", "--log-replica-updates=ON"]
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: app
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prootpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - mysql1:/var/lib/mysql
+      - ./deploy/mysql/primary.cnf:/etc/mysql/conf.d/ha.cnf:ro
+      - ./deploy/mysql/primary-init.sql:/docker-entrypoint-initdb.d/01-primary.sql:ro
+    networks: [ha]
+  mysql-2:
+    image: mysql:8.0.39
+    command: ["--server-id=2", "--log-bin=mysql-bin", "--relay-log=mysql-relay", "--binlog-format=ROW", "--gtid-mode=ON", "--enforce-gtid-consistency=ON", "--log-replica-updates=ON"]
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: app
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prootpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - mysql2:/var/lib/mysql
+      - ./deploy/mysql/replica.cnf:/etc/mysql/conf.d/ha.cnf:ro
+    networks: [ha]
+  mysql-3:
+    image: mysql:8.0.39
+    command: ["--server-id=3", "--log-bin=mysql-bin", "--relay-log=mysql-relay", "--binlog-format=ROW", "--gtid-mode=ON", "--enforce-gtid-consistency=ON", "--log-replica-updates=ON"]
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: app
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prootpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - mysql3:/var/lib/mysql
+      - ./deploy/mysql/replica.cnf:/etc/mysql/conf.d/ha.cnf:ro
+    networks: [ha]
+  replication-init:
+    image: mysql:8.0.39
+    depends_on:
+      mysql-1: {condition: service_healthy}
+      mysql-2: {condition: service_healthy}
+      mysql-3: {condition: service_healthy}
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+    volumes:
+      - ./deploy/mysql/init-replication.sh:/init-replication.sh:ro
+    entrypoint: ["/bin/bash", "/init-replication.sh"]
+    networks: [ha]
+  controller:
+    build: .
+    depends_on:
+      etcd-1: {condition: service_started}
+      etcd-2: {condition: service_started}
+      etcd-3: {condition: service_started}
+      replication-init: {condition: service_completed_successfully}
+    environment:
+      HA_HTTP_ADDR: :8080
+      HA_CLUSTER_NAME: mysql-ha-dev
+      HA_ETCD_ENDPOINTS: http://etcd-1:2379,http://etcd-2:2379,http://etcd-3:2379
+      HA_EXECUTE_ACTIONS: "true"
+      HA_AUTO_FAILOVER_EXECUTE: "false"
+      HA_NODES_JSON: '[{"id":"mysql-1","address":"mysql-1:3306","dsn":"root:rootpass@tcp(mysql-1:3306)/mysql?parseTime=true","replication_user":"repl","replication_password":"replpass","expected_role":"primary"},{"id":"mysql-2","address":"mysql-2:3306","dsn":"root:rootpass@tcp(mysql-2:3306)/mysql?parseTime=true","replication_user":"repl","replication_password":"replpass","expected_role":"replica"},{"id":"mysql-3","address":"mysql-3:3306","dsn":"root:rootpass@tcp(mysql-3:3306)/mysql?parseTime=true","replication_user":"repl","replication_password":"replpass","expected_role":"replica"}]'
+    ports: ["8080:8080"]
+    networks: [ha]
+
+volumes:
+  mysql1:
+  mysql2:
+  mysql3:
+
+networks:
+  ha:

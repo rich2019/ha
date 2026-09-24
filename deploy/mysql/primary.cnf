@@ -1,0 +1,4 @@
+[mysqld]
+read_only=OFF
+super_read_only=OFF
+skip_name_resolve=ON
