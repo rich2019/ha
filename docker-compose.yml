@@ -84,13 +84,99 @@ services:
       - ./deploy/mysql/init-replication.sh:/init-replication.sh:ro
     entrypoint: ["/bin/bash", "/init-replication.sh"]
     networks: [ha]
-  controller:
-    build: .
+  mysql-agent-1:
+    build:
+      context: .
+      args: {APP: mysql-agent}
+    user: "0:0"
+    restart: unless-stopped
     depends_on:
+      mysql-1: {condition: service_healthy}
       etcd-1: {condition: service_started}
       etcd-2: {condition: service_started}
       etcd-3: {condition: service_started}
-      replication-init: {condition: service_completed_successfully}
+    environment:
+      HA_AGENT_HTTP_ADDR: :9443
+      HA_NODE_ID: mysql-1
+      HA_NODE_ADDRESS: mysql-1:3306
+      HA_MYSQL_DSN: ha_agent:replpass@tcp(mysql-1:3306)/?parseTime=true
+      HA_REPLICATION_USER: repl
+      HA_REPLICATION_PASSWORD: replpass
+      HA_ETCD_ENDPOINTS: http://etcd-1:2379,http://etcd-2:2379,http://etcd-3:2379
+      HA_CLUSTER_NAME: mysql-ha-dev
+      HA_AGENT_CA_FILE: /etc/ha/pki/ca.crt
+      HA_AGENT_CERT_FILE: /etc/ha/pki/agent-mysql-agent-1.crt
+      HA_AGENT_KEY_FILE: /etc/ha/pki/agent-mysql-agent-1.key
+    volumes: [./work/dev-pki:/etc/ha/pki:ro]
+    networks: [ha]
+  mysql-agent-2:
+    build:
+      context: .
+      args: {APP: mysql-agent}
+    user: "0:0"
+    restart: unless-stopped
+    depends_on:
+      mysql-2: {condition: service_healthy}
+      etcd-1: {condition: service_started}
+      etcd-2: {condition: service_started}
+      etcd-3: {condition: service_started}
+    environment:
+      HA_AGENT_HTTP_ADDR: :9443
+      HA_NODE_ID: mysql-2
+      HA_NODE_ADDRESS: mysql-2:3306
+      HA_MYSQL_DSN: ha_agent:replpass@tcp(mysql-2:3306)/?parseTime=true
+      HA_REPLICATION_USER: repl
+      HA_REPLICATION_PASSWORD: replpass
+      HA_ETCD_ENDPOINTS: http://etcd-1:2379,http://etcd-2:2379,http://etcd-3:2379
+      HA_CLUSTER_NAME: mysql-ha-dev
+      HA_AGENT_CA_FILE: /etc/ha/pki/ca.crt
+      HA_AGENT_CERT_FILE: /etc/ha/pki/agent-mysql-agent-2.crt
+      HA_AGENT_KEY_FILE: /etc/ha/pki/agent-mysql-agent-2.key
+    volumes: [./work/dev-pki:/etc/ha/pki:ro]
+    networks: [ha]
+  mysql-agent-3:
+    build:
+      context: .
+      args: {APP: mysql-agent}
+    user: "0:0"
+    restart: unless-stopped
+    depends_on:
+      mysql-3: {condition: service_healthy}
+      etcd-1: {condition: service_started}
+      etcd-2: {condition: service_started}
+      etcd-3: {condition: service_started}
+    environment:
+      HA_AGENT_HTTP_ADDR: :9443
+      HA_NODE_ID: mysql-3
+      HA_NODE_ADDRESS: mysql-3:3306
+      HA_MYSQL_DSN: ha_agent:replpass@tcp(mysql-3:3306)/?parseTime=true
+      HA_REPLICATION_USER: repl
+      HA_REPLICATION_PASSWORD: replpass
+      HA_ETCD_ENDPOINTS: http://etcd-1:2379,http://etcd-2:2379,http://etcd-3:2379
+      HA_CLUSTER_NAME: mysql-ha-dev
+      HA_AGENT_CA_FILE: /etc/ha/pki/ca.crt
+      HA_AGENT_CERT_FILE: /etc/ha/pki/agent-mysql-agent-3.crt
+      HA_AGENT_KEY_FILE: /etc/ha/pki/agent-mysql-agent-3.key
+    volumes: [./work/dev-pki:/etc/ha/pki:ro]
+    networks: [ha]
+  alert-receiver:
+    build:
+      context: .
+      args: {APP: alert-receiver}
+    command: ["-listen=0.0.0.0:9099"]
+    restart: unless-stopped
+    networks: [ha]
+  controller:
+    build:
+      context: .
+      args: {APP: controller}
+    user: "0:0"
+    restart: unless-stopped
+    depends_on:
+      mysql-agent-1: {condition: service_started}
+      mysql-agent-2: {condition: service_started}
+      mysql-agent-3: {condition: service_started}
+      alert-receiver: {condition: service_started}
     environment:
       HA_HTTP_ADDR: :8080
       HA_CLUSTER_NAME: mysql-ha-dev
@@ -98,7 +184,14 @@ services:
       HA_EXECUTE_ACTIONS: "true"
       HA_AUTO_FAILOVER_EXECUTE: "false"
       HA_REQUIRE_ETCD: "true"
-      HA_NODES_JSON: '[{"id":"mysql-1","address":"mysql-1:3306","dsn":"root:rootpass@tcp(mysql-1:3306)/mysql?parseTime=true","replication_user":"repl","replication_password":"replpass","expected_role":"primary"},{"id":"mysql-2","address":"mysql-2:3306","dsn":"root:rootpass@tcp(mysql-2:3306)/mysql?parseTime=true","replication_user":"repl","replication_password":"replpass","expected_role":"replica"},{"id":"mysql-3","address":"mysql-3:3306","dsn":"root:rootpass@tcp(mysql-3:3306)/mysql?parseTime=true","replication_user":"repl","replication_password":"replpass","expected_role":"replica"}]'
+      HA_AGENTS_FILE: /etc/ha/agents.json
+      HA_AGENT_CA_FILE: /etc/ha/pki/ca.crt
+      HA_AGENT_CERT_FILE: /etc/ha/pki/controller-1.crt
+      HA_AGENT_KEY_FILE: /etc/ha/pki/controller-1.key
+      HA_ALERT_WEBHOOK_URL: http://alert-receiver:9099/webhook
+    volumes:
+      - ./deploy/dev/agents.json:/etc/ha/agents.json:ro
+      - ./work/dev-pki:/etc/ha/pki:ro
     ports: ["127.0.0.1:8080:8080"]
     networks: [ha]
 

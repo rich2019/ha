@@ -1,16 +1,16 @@
 [Unit]
-Description=MySQL HA Controller
+Description=MySQL HA Node Agent
 After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/ha/controller.env
-ExecStart=/opt/ha/ha-controller
+EnvironmentFile=/etc/ha/agent.env
+ExecStart=/opt/ha/mysql-agent
 Restart=on-failure
 RestartSec=3
-User=ha-controller
-Group=ha-controller
+User=ha-agent
+Group=ha-agent
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

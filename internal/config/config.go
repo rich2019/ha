@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -15,7 +16,11 @@ type Config struct {
 	ClusterName          string
 	ControllerID         string
 	EtcdEndpoints        []string
-	Nodes                []model.NodeConfig
+	Nodes                []model.AgentNodeConfig
+	AgentCAFile          string
+	AgentCertFile        string
+	AgentKeyFile         string
+	AgentsFile           string
 	ProbeInterval        time.Duration
 	FailureThreshold     int
 	AlertWebhookURL      string
@@ -38,11 +43,57 @@ func Load() (Config, error) {
 		AutoFailoverExecute:  boolean("HA_AUTO_FAILOVER_EXECUTE", false),
 		RequireEtcd:          boolean("HA_REQUIRE_ETCD", false),
 		MaxReplicaLagSeconds: int64Value("HA_MAX_REPLICA_LAG_SECONDS", 30),
+		AgentCAFile:          env("HA_AGENT_CA_FILE", "/etc/ha/pki/ca.crt"),
+		AgentCertFile:        env("HA_AGENT_CERT_FILE", "/etc/ha/pki/controller.crt"),
+		AgentKeyFile:         env("HA_AGENT_KEY_FILE", "/etc/ha/pki/controller.key"),
+		AgentsFile:           os.Getenv("HA_AGENTS_FILE"),
 	}
-	if raw := os.Getenv("HA_NODES_JSON"); raw != "" {
+	raw := os.Getenv("HA_AGENTS_JSON")
+	if c.AgentsFile != "" {
+		data, err := os.ReadFile(c.AgentsFile)
+		if err != nil {
+			return Config{}, fmt.Errorf("read HA_AGENTS_FILE: %w", err)
+		}
+		raw = string(data)
+	}
+	if raw != "" {
 		if err := json.Unmarshal([]byte(raw), &c.Nodes); err != nil {
 			return Config{}, err
 		}
+	}
+	return c, nil
+}
+
+type AgentConfig struct {
+	HTTPAddr        string
+	NodeID          string
+	NodeAddress     string
+	MySQLDSN        string
+	ReplicationUser string
+	ReplicationPass string
+	AgentCAFile     string
+	AgentCertFile   string
+	AgentKeyFile    string
+	EtcdEndpoints   []string
+	ClusterName     string
+}
+
+func LoadAgent() (AgentConfig, error) {
+	c := AgentConfig{
+		HTTPAddr:        env("HA_AGENT_HTTP_ADDR", ":9443"),
+		NodeID:          os.Getenv("HA_NODE_ID"),
+		NodeAddress:     os.Getenv("HA_NODE_ADDRESS"),
+		MySQLDSN:        os.Getenv("HA_MYSQL_DSN"),
+		ReplicationUser: os.Getenv("HA_REPLICATION_USER"),
+		ReplicationPass: os.Getenv("HA_REPLICATION_PASSWORD"),
+		AgentCAFile:     env("HA_AGENT_CA_FILE", "/etc/ha/pki/ca.crt"),
+		AgentCertFile:   env("HA_AGENT_CERT_FILE", "/etc/ha/pki/agent.crt"),
+		AgentKeyFile:    env("HA_AGENT_KEY_FILE", "/etc/ha/pki/agent.key"),
+		EtcdEndpoints:   split(env("HA_ETCD_ENDPOINTS", "http://127.0.0.1:2379")),
+		ClusterName:     env("HA_CLUSTER_NAME", "mysql-ha"),
+	}
+	if c.NodeID == "" || c.NodeAddress == "" || c.MySQLDSN == "" || c.ReplicationUser == "" || c.ReplicationPass == "" {
+		return AgentConfig{}, fmt.Errorf("HA_NODE_ID, HA_NODE_ADDRESS, HA_MYSQL_DSN, HA_REPLICATION_USER and HA_REPLICATION_PASSWORD are required")
 	}
 	return c, nil
 }

@@ -10,13 +10,39 @@ const (
 	RoleReplica Role = "replica"
 )
 
-type NodeConfig struct {
-	ID              string `json:"id"`
-	Address         string `json:"address"`
-	DSN             string `json:"dsn"`
-	ReplicationUser string `json:"replication_user"`
-	ReplicationPass string `json:"replication_password"`
-	ExpectedRole    Role   `json:"expected_role"`
+type AgentNodeConfig struct {
+	ID       string `json:"id"`
+	Address  string `json:"address"`
+	AgentURL string `json:"agent_url"`
+}
+
+type MySQLNodeConfig struct {
+	ID              string
+	Address         string
+	DSN             string
+	ReplicationUser string
+	ReplicationPass string
+}
+
+type SwitchAuthorization struct {
+	OperationID string `json:"operation_id"`
+	FromEpoch   uint64 `json:"from_epoch"`
+	ToEpoch     uint64 `json:"to_epoch"`
+}
+
+type ReplicaRequest struct {
+	Authorization SwitchAuthorization `json:"authorization"`
+	Source        AgentNodeConfig     `json:"source"`
+}
+
+type OperationRequest struct {
+	Authorization SwitchAuthorization `json:"authorization"`
+}
+
+type WaitGTIDRequest struct {
+	Authorization  SwitchAuthorization `json:"authorization"`
+	GTID           string              `json:"gtid"`
+	TimeoutSeconds int                 `json:"timeout_seconds"`
 }
 
 type ReplicaStatus struct {

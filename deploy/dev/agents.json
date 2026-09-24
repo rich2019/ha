@@ -1,0 +1,5 @@
+[
+  {"id":"mysql-1","address":"mysql-1:3306","agent_url":"https://mysql-agent-1:9443"},
+  {"id":"mysql-2","address":"mysql-2:3306","agent_url":"https://mysql-agent-2:9443"},
+  {"id":"mysql-3","address":"mysql-3:3306","agent_url":"https://mysql-agent-3:9443"}
+]

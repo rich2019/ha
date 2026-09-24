@@ -12,11 +12,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	remoteagent "github.com/ddchencm/ha/internal/agent"
 	"github.com/ddchencm/ha/internal/alert"
 	"github.com/ddchencm/ha/internal/config"
 	"github.com/ddchencm/ha/internal/fence"
 	"github.com/ddchencm/ha/internal/model"
-	mysqlclient "github.com/ddchencm/ha/internal/mysql"
 	"github.com/ddchencm/ha/internal/route"
 	"github.com/ddchencm/ha/internal/store"
 )
@@ -31,8 +31,8 @@ func init() { prometheus.MustRegister(probeTotal, probeHealthy, lastSwitch) }
 
 type Controller struct {
 	cfg     config.Config
-	clients map[string]*mysqlclient.Client
-	configs map[string]model.NodeConfig
+	clients map[string]remoteagent.Node
+	configs map[string]model.AgentNodeConfig
 	store   store.Store
 	alerts  *alert.Manager
 	router  route.Manager
@@ -46,24 +46,25 @@ type Controller struct {
 	lastDryRunPrimary string
 	leader            atomic.Bool
 	alertedNodes      map[string]bool
+	leaderCtx         context.Context
 }
 
 func NewController(cfg config.Config, stateStore store.Store, logger *slog.Logger) (*Controller, error) {
 	if len(cfg.Nodes) == 0 {
-		return nil, errors.New("HA_NODES_JSON must contain at least one MySQL node")
+		return nil, errors.New("HA_AGENTS_JSON must contain at least one MySQL agent")
 	}
 	c := &Controller{
-		cfg: cfg, clients: make(map[string]*mysqlclient.Client), configs: make(map[string]model.NodeConfig),
+		cfg: cfg, clients: make(map[string]remoteagent.Node), configs: make(map[string]model.AgentNodeConfig),
 		store: stateStore, alerts: alert.NewManager(cfg.AlertWebhookURL), router: route.NoopManager{},
 		fencer: fence.NoopManager{}, logger: logger, statuses: make(map[string]model.NodeStatus), alertedNodes: make(map[string]bool),
 	}
 	for _, node := range cfg.Nodes {
-		if node.ID == "" || node.DSN == "" {
-			return nil, fmt.Errorf("node %q must define id and dsn", node.ID)
+		if node.ID == "" || node.Address == "" || node.AgentURL == "" {
+			return nil, fmt.Errorf("node %q must define id, address and agent_url", node.ID)
 		}
-		client, err := mysqlclient.NewClient(node)
+		client, err := remoteagent.NewClient(node, cfg.AgentCAFile, cfg.AgentCertFile, cfg.AgentKeyFile)
 		if err != nil {
-			return nil, fmt.Errorf("create client %s: %w", node.ID, err)
+			return nil, fmt.Errorf("create agent client %s: %w", node.ID, err)
 		}
 		c.clients[node.ID] = client
 		c.configs[node.ID] = node
@@ -73,7 +74,7 @@ func NewController(cfg config.Config, stateStore store.Store, logger *slog.Logge
 
 func (c *Controller) Close() error {
 	for _, client := range c.clients {
-		_ = client.Close()
+		client.Close()
 	}
 	return c.store.Close()
 }
@@ -84,7 +85,15 @@ func (c *Controller) Run(ctx context.Context) error {
 
 func (c *Controller) runAsLeader(ctx context.Context) {
 	c.leader.Store(true)
-	defer c.leader.Store(false)
+	c.mu.Lock()
+	c.leaderCtx = ctx
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.leaderCtx = nil
+		c.mu.Unlock()
+		c.leader.Store(false)
+	}()
 	c.probe(ctx)
 	ticker := time.NewTicker(c.cfg.ProbeInterval)
 	defer ticker.Stop()
@@ -116,7 +125,8 @@ func (c *Controller) probe(ctx context.Context) {
 		c.statuses[id] = status
 		if status.FailureCount >= c.cfg.FailureThreshold && !c.alertedNodes[id] {
 			c.alertedNodes[id] = true
-			alertEvents = append(alertEvents, model.AlertEvent{NodeID: id, Severity: "critical", Title: "MySQL node unhealthy", Message: status.Error, CreatedAt: status.CheckedAt})
+			severity, title, message := failureAlert(status)
+			alertEvents = append(alertEvents, model.AlertEvent{NodeID: id, Severity: severity, Title: title, Message: message, CreatedAt: status.CheckedAt})
 		} else if status.Healthy && c.alertedNodes[id] {
 			delete(c.alertedNodes, id)
 			alertEvents = append(alertEvents, model.AlertEvent{NodeID: id, Severity: "info", Title: "MySQL node recovered", Message: "health checks passed", Resolved: true, CreatedAt: status.CheckedAt})
@@ -145,6 +155,18 @@ func (c *Controller) probe(ctx context.Context) {
 }
 
 func (c *Controller) IsLeader() bool { return c.leader.Load() }
+
+func (c *Controller) leaderBoundContext(parent context.Context) (context.Context, context.CancelFunc, error) {
+	c.mu.RLock()
+	leaderCtx := c.leaderCtx
+	c.mu.RUnlock()
+	if leaderCtx == nil || leaderCtx.Err() != nil {
+		return nil, nil, errors.New("controller leadership lease is not active")
+	}
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(leaderCtx, cancel)
+	return ctx, func() { stop(); cancel() }, nil
+}
 
 func (c *Controller) detectPrimary() string {
 	c.mu.RLock()
@@ -175,7 +197,13 @@ func (c *Controller) tryAutomaticFailover(ctx context.Context, primary string) {
 	if !c.cfg.AutoFailoverExecute && alreadyReported {
 		return
 	}
-	target, err := c.chooseTarget(primary)
+	var target string
+	var err error
+	if c.cfg.AutoFailoverExecute {
+		target, err = c.chooseTarget(primary)
+	} else {
+		target, err = c.chooseDryRunTarget(primary)
+	}
 	if err != nil {
 		c.logger.Error("choose automatic failover target", "error", err)
 		return
@@ -183,6 +211,33 @@ func (c *Controller) tryAutomaticFailover(ctx context.Context, primary string) {
 	if _, err := c.Switch(ctx, target, true); err != nil {
 		c.logger.Error("automatic failover attempt", "error", err)
 	}
+}
+
+func failureAlert(status model.NodeStatus) (severity, title, message string) {
+	severity, title, message = "critical", "MySQL node unhealthy", status.Error
+	if message == "" && status.Replica != nil {
+		switch {
+		case !status.Replica.IOThreadRunning:
+			message = status.Replica.LastIOError
+			if message == "" {
+				message = "replica IO thread is stopped"
+			}
+		case !status.Replica.SQLThreadRunning:
+			message = status.Replica.LastSQLError
+			if message == "" {
+				message = "replica SQL thread is stopped"
+			}
+		case status.Replica.SecondsBehind == nil:
+			message = "replica lag is unknown"
+		}
+	}
+	if message == "" {
+		message = "node reported unhealthy without diagnostics"
+	}
+	if status.Role == model.RoleReplica && status.Replica != nil && !status.Replica.IOThreadRunning && status.Replica.SQLThreadRunning {
+		severity, title = "warning", "MySQL replica IO thread unavailable"
+	}
+	return severity, title, message
 }
 
 func (c *Controller) isTripping() bool {
@@ -210,6 +265,12 @@ func (c *Controller) SetAutoFailover(ctx context.Context, enabled bool) error {
 	if !c.IsLeader() {
 		return errors.New("controller is not the Etcd leader")
 	}
+	var stopLeader context.CancelFunc
+	ctx, stopLeader, err := c.leaderBoundContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer stopLeader()
 	lockCtx, release, err := c.store.AcquireLock(ctx, c.cfg.ControllerID, 10*time.Second)
 	if err != nil {
 		return err
@@ -229,6 +290,12 @@ func (c *Controller) Switch(ctx context.Context, target string, automatic bool) 
 	if !c.IsLeader() {
 		return nil, errors.New("controller is not the Etcd leader")
 	}
+	var stopLeader context.CancelFunc
+	ctx, stopLeader, err := c.leaderBoundContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer stopLeader()
 	state, err := c.store.GetCluster(ctx)
 	if err != nil {
 		return nil, err
@@ -245,7 +312,9 @@ func (c *Controller) Switch(ctx context.Context, target string, automatic bool) 
 	if target == state.Primary {
 		return nil, errors.New("target is already the current primary")
 	}
-	lockCtx, release, err := c.store.AcquireLock(ctx, c.cfg.ControllerID, 30*time.Second)
+	operationID := fmt.Sprintf("switch-%d", time.Now().UnixNano())
+	authorization := model.SwitchAuthorization{OperationID: operationID, FromEpoch: state.Epoch, ToEpoch: state.Epoch + 1}
+	lockCtx, release, err := c.store.AcquireSwitchLock(ctx, c.cfg.ControllerID, 5*time.Minute, authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -264,13 +333,17 @@ func (c *Controller) Switch(ctx context.Context, target string, automatic bool) 
 	if target == lockedState.Primary {
 		return nil, errors.New("target is already the current primary")
 	}
+	dryRun := !c.cfg.ExecuteActions || (automatic && !c.cfg.AutoFailoverExecute)
 	candidate := c.clients[target].Status(ctx)
-	if !candidate.Healthy || candidate.Role != model.RoleReplica || candidate.Replica == nil || candidate.Replica.SecondsBehind == nil || *candidate.Replica.SecondsBehind > c.cfg.MaxReplicaLagSeconds {
+	candidateEligible := candidate.Healthy && candidate.Replica != nil && candidate.Replica.IOThreadRunning && candidate.Replica.SQLThreadRunning && candidate.Replica.SecondsBehind != nil && *candidate.Replica.SecondsBehind <= c.cfg.MaxReplicaLagSeconds
+	if dryRun && automatic {
+		candidateEligible = candidate.Reachable && candidate.Role == model.RoleReplica && candidate.Replica != nil && candidate.Replica.SQLThreadRunning
+	}
+	if !candidateEligible || candidate.Role != model.RoleReplica {
 		return nil, fmt.Errorf("target %s is not a healthy, caught-up replica", target)
 	}
 
-	dryRun := !c.cfg.ExecuteActions || (automatic && !c.cfg.AutoFailoverExecute)
-	task := &model.SwitchTask{ID: fmt.Sprintf("switch-%d", time.Now().UnixNano()), From: state.Primary, To: target, Automatic: automatic, DryRun: dryRun, State: "running", StartedAt: time.Now().UTC()}
+	task := &model.SwitchTask{ID: operationID, From: state.Primary, To: target, Automatic: automatic, DryRun: dryRun, State: "running", StartedAt: time.Now().UTC()}
 	c.mu.Lock()
 	c.tripping = true
 	c.lastTask = task
@@ -305,19 +378,21 @@ func (c *Controller) Switch(ctx context.Context, target string, automatic bool) 
 	if oldPrimary == nil {
 		return c.finishTask(task, errors.New("current primary is not configured"))
 	}
-	if err := oldPrimary.Demote(ctx); err != nil {
+	if err := oldPrimary.Demote(ctx, authorization); err != nil {
 		return c.finishTask(task, fmt.Errorf("demote old primary: %w", err))
+	}
+	demoted := oldPrimary.Status(ctx)
+	if !demoted.Reachable || !demoted.ReadOnly || !demoted.SuperReadOnly {
+		return c.finishTask(task, fmt.Errorf("old primary %s could not be confirmed read-only; refusing promotion", state.Primary))
 	}
 	gtid, err := oldPrimary.ExecutedGTID(ctx)
 	if err != nil {
 		return c.finishTask(task, fmt.Errorf("read old primary GTID: %w", err))
 	}
-	if err := c.clients[target].WaitForGTID(ctx, gtid, 15); err != nil {
-		_ = oldPrimary.SetReadOnly(ctx, false)
+	if err := c.clients[target].WaitForGTID(ctx, authorization, gtid, 30); err != nil {
 		return c.finishTask(task, fmt.Errorf("wait for target to catch up: %w", err))
 	}
-	if err := c.clients[target].Promote(ctx); err != nil {
-		_ = oldPrimary.SetReadOnly(ctx, false)
+	if err := c.clients[target].Promote(ctx, authorization); err != nil {
 		return c.finishTask(task, fmt.Errorf("promote %s: %w", target, err))
 	}
 	if promoted := c.clients[target].Status(ctx); !promoted.Healthy || promoted.Role != model.RolePrimary {
@@ -336,7 +411,7 @@ func (c *Controller) Switch(ctx context.Context, target string, automatic bool) 
 		if id == target {
 			continue
 		}
-		if err := client.ReconfigureReplica(ctx, c.configs[target]); err != nil {
+		if err := client.ReconfigureReplica(ctx, authorization, c.configs[target]); err != nil {
 			return c.finishTask(task, fmt.Errorf("reconfigure replica %s: %w", id, err))
 		}
 	}
@@ -389,4 +464,23 @@ func (c *Controller) chooseTarget(exclude string) (string, error) {
 		return candidates[i].lag < candidates[j].lag
 	})
 	return candidates[0].id, nil
+}
+
+// chooseDryRunTarget is intentionally less strict than the promotion candidate
+// selector: when the primary is down, replicas commonly lose only their IO
+// thread. A dry-run may report an illustrative candidate, but it never promotes.
+func (c *Controller) chooseDryRunTarget(exclude string) (string, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ids := make([]string, 0, len(c.statuses))
+	for id, status := range c.statuses {
+		if id != exclude && status.Reachable && status.Role == model.RoleReplica && status.Replica != nil && status.Replica.SQLThreadRunning {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return "", errors.New("no reachable replica can be reported in dry-run")
+	}
+	return ids[0], nil
 }

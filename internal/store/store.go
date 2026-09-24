@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -19,6 +20,8 @@ type Store interface {
 	PutCluster(context.Context, model.ClusterState) error
 	PutClusterIfEpoch(context.Context, uint64, model.ClusterState) error
 	AcquireLock(context.Context, string, time.Duration) (context.Context, func(), error)
+	AcquireSwitchLock(context.Context, string, time.Duration, model.SwitchAuthorization) (context.Context, func(), error)
+	VerifySwitchOperation(context.Context, model.SwitchAuthorization) error
 	RunLeaderElection(context.Context, string, func(context.Context)) error
 	PutTask(context.Context, model.SwitchTask) error
 	ListTasks(context.Context, int) ([]model.SwitchTask, error)
@@ -26,10 +29,11 @@ type Store interface {
 }
 
 type MemoryStore struct {
-	mu      sync.Mutex
-	cluster model.ClusterState
-	locked  bool
-	tasks   map[string]model.SwitchTask
+	mu        sync.Mutex
+	cluster   model.ClusterState
+	locked    bool
+	tasks     map[string]model.SwitchTask
+	operation *model.SwitchAuthorization
 }
 
 func NewMemoryStore(name string) Store {
@@ -74,6 +78,35 @@ func (s *MemoryStore) AcquireLock(ctx context.Context, _ string, _ time.Duration
 	}, nil
 }
 
+func (s *MemoryStore) AcquireSwitchLock(ctx context.Context, holder string, ttl time.Duration, auth model.SwitchAuthorization) (context.Context, func(), error) {
+	lockCtx, release, err := s.AcquireLock(ctx, holder, ttl)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.mu.Lock()
+	copy := auth
+	s.operation = &copy
+	s.mu.Unlock()
+	return lockCtx, func() {
+		s.mu.Lock()
+		s.operation = nil
+		s.mu.Unlock()
+		release()
+	}, nil
+}
+
+func (s *MemoryStore) VerifySwitchOperation(_ context.Context, auth model.SwitchAuthorization) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.operation == nil || *s.operation != auth {
+		return errors.New("switch operation is not authorized")
+	}
+	if s.cluster.Epoch != auth.FromEpoch && s.cluster.Epoch != auth.ToEpoch {
+		return errors.New("switch operation epoch is stale")
+	}
+	return nil
+}
+
 func (s *MemoryStore) PutTask(_ context.Context, task model.SwitchTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -108,17 +141,28 @@ type EtcdStore struct {
 }
 
 func NewEtcdStore(endpoints []string, clusterName string) (Store, error) {
+	if len(endpoints) == 0 {
+		return nil, errors.New("at least one Etcd endpoint is required")
+	}
 	client, err := clientv3.New(clientv3.Config{Endpoints: endpoints, DialTimeout: 3 * time.Second})
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if _, err := client.Status(ctx, endpoints[0]); err != nil {
-		_ = client.Close()
-		return nil, err
+	var lastErr error
+	for _, endpoint := range endpoints {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if _, lastErr = client.Status(ctx, endpoint); lastErr == nil {
+			cancel()
+			return &EtcdStore{client: client, prefix: "/ha/" + clusterName}, nil
+		}
+		cancel()
 	}
-	return &EtcdStore{client: client, prefix: "/ha/" + clusterName}, nil
+	if lastErr != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("no Etcd endpoint is reachable: %w", lastErr)
+	}
+	_ = client.Close()
+	return nil, errors.New("no Etcd endpoint is reachable")
 }
 
 func (s *EtcdStore) GetCluster(ctx context.Context) (model.ClusterState, error) {
@@ -179,18 +223,77 @@ func (s *EtcdStore) PutClusterIfEpoch(ctx context.Context, expected uint64, stat
 }
 
 func (s *EtcdStore) AcquireLock(ctx context.Context, holder string, ttl time.Duration) (context.Context, func(), error) {
+	lockCtx, release, _, err := s.acquireEtcdLock(ctx, holder, ttl)
+	return lockCtx, release, err
+}
+
+func (s *EtcdStore) AcquireSwitchLock(ctx context.Context, holder string, ttl time.Duration, auth model.SwitchAuthorization) (context.Context, func(), error) {
+	state, err := s.GetCluster(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if state.Epoch != auth.FromEpoch || auth.ToEpoch != auth.FromEpoch+1 || auth.OperationID == "" {
+		return nil, nil, errors.New("invalid switch authorization epoch")
+	}
+	lockCtx, release, session, err := s.acquireEtcdLock(ctx, holder, ttl)
+	if err != nil {
+		return nil, nil, err
+	}
+	payload, err := json.Marshal(auth)
+	if err == nil {
+		_, err = s.client.Put(lockCtx, s.prefix+"/switch-operation", string(payload), clientv3.WithLease(session.Lease()))
+	}
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return lockCtx, func() {
+		_, _ = s.client.Delete(context.Background(), s.prefix+"/switch-operation")
+		release()
+	}, nil
+}
+
+func (s *EtcdStore) VerifySwitchOperation(ctx context.Context, auth model.SwitchAuthorization) error {
+	if auth.OperationID == "" || auth.ToEpoch != auth.FromEpoch+1 {
+		return errors.New("invalid switch authorization")
+	}
+	state, err := s.GetCluster(ctx)
+	if err != nil {
+		return err
+	}
+	if state.Epoch != auth.FromEpoch && state.Epoch != auth.ToEpoch {
+		return errors.New("switch operation epoch is stale")
+	}
+	response, err := s.client.Get(ctx, s.prefix+"/switch-operation")
+	if err != nil {
+		return err
+	}
+	if len(response.Kvs) != 1 {
+		return errors.New("no active switch operation")
+	}
+	var active model.SwitchAuthorization
+	if err := json.Unmarshal(response.Kvs[0].Value, &active); err != nil {
+		return err
+	}
+	if active != auth {
+		return errors.New("switch operation authorization mismatch")
+	}
+	return nil
+}
+
+func (s *EtcdStore) acquireEtcdLock(ctx context.Context, holder string, ttl time.Duration) (context.Context, func(), *concurrency.Session, error) {
 	ttlSeconds := int(ttl.Seconds())
 	if ttlSeconds < 1 {
 		ttlSeconds = 1
 	}
 	session, err := concurrency.NewSession(s.client, concurrency.WithTTL(ttlSeconds), concurrency.WithContext(ctx))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	mutex := concurrency.NewMutex(session, s.prefix+"/switch-lock/")
 	if err := mutex.Lock(ctx); err != nil {
 		_ = session.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	_ = holder
 	lockCtx, cancel := context.WithCancel(ctx)
@@ -208,7 +311,7 @@ func (s *EtcdStore) AcquireLock(ctx context.Context, holder string, ttl time.Dur
 			_ = mutex.Unlock(context.Background())
 			_ = session.Close()
 		})
-	}, nil
+	}, session, nil
 }
 
 func (s *EtcdStore) PutTask(ctx context.Context, task model.SwitchTask) error {

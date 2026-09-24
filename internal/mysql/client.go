@@ -15,11 +15,11 @@ import (
 )
 
 type Client struct {
-	config model.NodeConfig
+	config model.MySQLNodeConfig
 	db     *sql.DB
 }
 
-func NewClient(config model.NodeConfig) (*Client, error) {
+func NewClient(config model.MySQLNodeConfig) (*Client, error) {
 	db, err := sql.Open("mysql", config.DSN)
 	if err != nil {
 		return nil, err
@@ -161,7 +161,7 @@ func (c *Client) Promote(ctx context.Context) error {
 
 func (c *Client) Demote(ctx context.Context) error { return c.SetReadOnly(ctx, true) }
 
-func (c *Client) ReconfigureReplica(ctx context.Context, source model.NodeConfig) error {
+func (c *Client) ReconfigureReplica(ctx context.Context, source model.AgentNodeConfig) error {
 	if _, err := c.db.ExecContext(ctx, "STOP REPLICA"); err != nil && !replicaChannelAbsent(err) {
 		return err
 	}
@@ -169,10 +169,10 @@ func (c *Client) ReconfigureReplica(ctx context.Context, source model.NodeConfig
 		return err
 	}
 	host, port := splitAddress(source.Address)
-	if source.ReplicationUser == "" || source.ReplicationPass == "" {
+	if c.config.ReplicationUser == "" || c.config.ReplicationPass == "" {
 		return errors.New("replication credentials are missing")
 	}
-	query := fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_HOST = '%s', SOURCE_PORT = %d, SOURCE_USER = '%s', SOURCE_PASSWORD = '%s', SOURCE_AUTO_POSITION = 1", quoteSQL(host), port, quoteSQL(source.ReplicationUser), quoteSQL(source.ReplicationPass))
+	query := fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_HOST = '%s', SOURCE_PORT = %d, SOURCE_USER = '%s', SOURCE_PASSWORD = '%s', SOURCE_AUTO_POSITION = 1", quoteSQL(host), port, quoteSQL(c.config.ReplicationUser), quoteSQL(c.config.ReplicationPass))
 	if _, err := c.db.ExecContext(ctx, query); err != nil {
 		return err
 	}
