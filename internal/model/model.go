@@ -63,3 +63,12 @@ type SwitchTask struct {
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`
 }
+
+type AlertEvent struct {
+	NodeID    string    `json:"node_id"`
+	Severity  string    `json:"severity"`
+	Title     string    `json:"title"`
+	Message   string    `json:"message"`
+	Resolved  bool      `json:"resolved"`
+	CreatedAt time.Time `json:"created_at"`
+}

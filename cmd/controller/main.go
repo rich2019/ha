@@ -24,6 +24,10 @@ func main() {
 	}
 	stateStore, err := store.NewEtcdStore(cfg.EtcdEndpoints, cfg.ClusterName)
 	if err != nil {
+		if cfg.RequireEtcd {
+			logger.Error("Etcd is required; refusing to start without quorum", "error", err)
+			os.Exit(1)
+		}
 		logger.Warn("etcd unavailable, using in-memory state; persistence is disabled", "error", err)
 		stateStore = store.NewMemoryStore(cfg.ClusterName)
 	}

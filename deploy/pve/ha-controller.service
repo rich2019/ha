@@ -1,0 +1,19 @@
+[Unit]
+Description=MySQL HA Controller
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/ha/controller.env
+ExecStart=/opt/ha/ha-controller
+Restart=on-failure
+RestartSec=3
+User=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

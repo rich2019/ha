@@ -1,0 +1,16 @@
+#!/bin/bash
+set -e
+
+if [[ "${HA_ROLE:-replica}" != "primary" ]]; then
+  exit 0
+fi
+
+mysql --protocol=socket -uroot -p"${MYSQL_ROOT_PASSWORD}" <<SQL
+CREATE USER IF NOT EXISTS 'ha_repl'@'%' IDENTIFIED WITH mysql_native_password BY '${HA_REPLICATION_PASSWORD}';
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'ha_repl'@'%';
+CREATE USER IF NOT EXISTS 'ha_agent'@'%' IDENTIFIED WITH mysql_native_password BY '${HA_REPLICATION_PASSWORD}';
+GRANT ALL PRIVILEGES ON *.* TO 'ha_agent'@'%' WITH GRANT OPTION;
+GRANT SYSTEM_VARIABLES_ADMIN, REPLICATION_SLAVE_ADMIN, REPLICATION CLIENT, RELOAD, PROCESS ON *.* TO 'ha_agent'@'%';
+CREATE DATABASE IF NOT EXISTS ha_app;
+FLUSH PRIVILEGES;
+SQL

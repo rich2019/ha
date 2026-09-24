@@ -32,16 +32,25 @@ func TestChooseTargetRejectsLaggingReplica(t *testing.T) {
 
 func TestMemoryStoreLockIsExclusive(t *testing.T) {
 	s := store.NewMemoryStore("test")
-	release, err := s.AcquireLock(context.Background(), "a", 1)
+	_, release, err := s.AcquireLock(context.Background(), "a", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcquireLock(context.Background(), "b", 1); err == nil {
+	if _, _, err := s.AcquireLock(context.Background(), "b", 1); err == nil {
 		t.Fatal("expected lock contention")
 	}
 	release()
-	if _, err := s.AcquireLock(context.Background(), "b", 1); err != nil {
+	if _, release, err := s.AcquireLock(context.Background(), "b", 1); err != nil {
 		t.Fatal(err)
+	} else {
+		release()
+	}
+}
+
+func TestSwitchRejectedWhenControllerIsNotLeader(t *testing.T) {
+	c := &Controller{}
+	if _, err := c.Switch(context.Background(), "mysql-2", false); err == nil {
+		t.Fatal("standby controller accepted a switchover")
 	}
 }
 

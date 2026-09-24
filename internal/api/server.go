@@ -17,6 +17,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /api/v1/status", s.status)
+	mux.HandleFunc("GET /api/v1/tasks", s.tasks)
 	mux.HandleFunc("POST /api/v1/switchover", s.switchover)
 	mux.HandleFunc("POST /api/v1/auto-failover", s.autoFailover)
 	mux.Handle("/metrics", promhttp.Handler())
@@ -33,19 +34,33 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cluster": state, "nodes": statuses, "last_task": task})
+	writeJSON(w, http.StatusOK, map[string]any{"cluster": state, "nodes": statuses, "last_task": task, "is_leader": s.controller.IsLeader()})
+}
+
+func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
+	tasks, err := s.controller.Tasks(r.Context(), 50)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tasks)
 }
 
 func (s *Server) switchover(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Target string `json:"target"`
 	}
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&request)
+	if r.Body == nil || json.NewDecoder(r.Body).Decode(&request) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON request"})
+		return
+	}
+	if request.Target == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
+		return
 	}
 	task, err := s.controller.Switch(r.Context(), request.Target, false)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, task)
+		writeJSON(w, http.StatusConflict, map[string]any{"task": task, "error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, task)

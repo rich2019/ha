@@ -5,3 +5,5 @@
 .idea/
 .vscode/
 coverage.out
+work/
+deploy/pve/*.env

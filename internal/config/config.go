@@ -21,6 +21,7 @@ type Config struct {
 	AlertWebhookURL      string
 	ExecuteActions       bool
 	AutoFailoverExecute  bool
+	RequireEtcd          bool
 	MaxReplicaLagSeconds int64
 }
 
@@ -35,6 +36,7 @@ func Load() (Config, error) {
 		AlertWebhookURL:      os.Getenv("HA_ALERT_WEBHOOK_URL"),
 		ExecuteActions:       boolean("HA_EXECUTE_ACTIONS", true),
 		AutoFailoverExecute:  boolean("HA_AUTO_FAILOVER_EXECUTE", false),
+		RequireEtcd:          boolean("HA_REQUIRE_ETCD", false),
 		MaxReplicaLagSeconds: int64Value("HA_MAX_REPLICA_LAG_SECONDS", 30),
 	}
 	if raw := os.Getenv("HA_NODES_JSON"); raw != "" {

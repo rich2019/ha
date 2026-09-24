@@ -1,0 +1,18 @@
+[Unit]
+Description=MySQL HA Validation Alert Receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/ha/ha-alert-receiver -listen=10.56.238.242:9099
+Restart=on-failure
+RestartSec=2
+User=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

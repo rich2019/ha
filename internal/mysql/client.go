@@ -57,8 +57,28 @@ func (c *Client) Status(ctx context.Context) model.NodeStatus {
 	}
 	status.Role = model.RoleReplica
 	status.Replica = replica
-	status.Healthy = replica.IOThreadRunning && replica.SQLThreadRunning && (replica.SecondsBehind == nil || *replica.SecondsBehind <= 30)
+	status.Healthy = replica.IOThreadRunning && replica.SQLThreadRunning && replica.SecondsBehind != nil
 	return status
+}
+
+func (c *Client) ExecutedGTID(ctx context.Context) (string, error) {
+	var set string
+	err := c.db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_executed").Scan(&set)
+	return set, err
+}
+
+func (c *Client) WaitForGTID(ctx context.Context, set string, timeoutSeconds int) error {
+	if set == "" {
+		return errors.New("source GTID set is empty")
+	}
+	var timedOut sql.NullInt64
+	if err := c.db.QueryRowContext(ctx, "SELECT WAIT_FOR_EXECUTED_GTID_SET(?, ?)", set, timeoutSeconds).Scan(&timedOut); err != nil {
+		return err
+	}
+	if !timedOut.Valid || timedOut.Int64 != 0 {
+		return errors.New("replica did not catch up to source GTID set")
+	}
+	return nil
 }
 
 func (c *Client) replicaStatus(ctx context.Context) (*model.ReplicaStatus, error) {
@@ -130,10 +150,10 @@ func (c *Client) SetReadOnly(ctx context.Context, readOnly bool) error {
 }
 
 func (c *Client) Promote(ctx context.Context) error {
-	if _, err := c.db.ExecContext(ctx, "STOP REPLICA"); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not running") {
+	if _, err := c.db.ExecContext(ctx, "STOP REPLICA"); err != nil && !replicaChannelAbsent(err) {
 		return err
 	}
-	if _, err := c.db.ExecContext(ctx, "RESET REPLICA ALL"); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not configured") {
+	if _, err := c.db.ExecContext(ctx, "RESET REPLICA ALL"); err != nil && !replicaChannelAbsent(err) {
 		return err
 	}
 	return c.SetReadOnly(ctx, false)
@@ -142,21 +162,37 @@ func (c *Client) Promote(ctx context.Context) error {
 func (c *Client) Demote(ctx context.Context) error { return c.SetReadOnly(ctx, true) }
 
 func (c *Client) ReconfigureReplica(ctx context.Context, source model.NodeConfig) error {
-	if _, err := c.db.ExecContext(ctx, "STOP REPLICA"); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not running") {
+	if _, err := c.db.ExecContext(ctx, "STOP REPLICA"); err != nil && !replicaChannelAbsent(err) {
 		return err
 	}
-	if _, err := c.db.ExecContext(ctx, "RESET REPLICA ALL"); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not configured") {
+	if _, err := c.db.ExecContext(ctx, "RESET REPLICA ALL"); err != nil && !replicaChannelAbsent(err) {
 		return err
 	}
 	host, port := splitAddress(source.Address)
-	query := `CHANGE REPLICATION SOURCE TO SOURCE_HOST = ?, SOURCE_PORT = ?, SOURCE_USER = ?, SOURCE_PASSWORD = ?, SOURCE_AUTO_POSITION = 1`
-	if _, err := c.db.ExecContext(ctx, query, host, port, source.ReplicationUser, source.ReplicationPass); err != nil {
+	if source.ReplicationUser == "" || source.ReplicationPass == "" {
+		return errors.New("replication credentials are missing")
+	}
+	query := fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_HOST = '%s', SOURCE_PORT = %d, SOURCE_USER = '%s', SOURCE_PASSWORD = '%s', SOURCE_AUTO_POSITION = 1", quoteSQL(host), port, quoteSQL(source.ReplicationUser), quoteSQL(source.ReplicationPass))
+	if _, err := c.db.ExecContext(ctx, query); err != nil {
 		return err
 	}
 	if _, err := c.db.ExecContext(ctx, "START REPLICA"); err != nil {
 		return err
 	}
 	return c.SetReadOnly(ctx, true)
+}
+
+func replicaChannelAbsent(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not running") ||
+		strings.Contains(message, "not configured as a replica") ||
+		strings.Contains(message, "no replica defined for channel") ||
+		strings.Contains(message, "no channels exist")
+}
+
+func quoteSQL(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	return strings.ReplaceAll(value, `'`, `\'`)
 }
 
 func splitAddress(address string) (string, int) {

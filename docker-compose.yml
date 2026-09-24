@@ -97,8 +97,9 @@ services:
       HA_ETCD_ENDPOINTS: http://etcd-1:2379,http://etcd-2:2379,http://etcd-3:2379
       HA_EXECUTE_ACTIONS: "true"
       HA_AUTO_FAILOVER_EXECUTE: "false"
+      HA_REQUIRE_ETCD: "true"
       HA_NODES_JSON: '[{"id":"mysql-1","address":"mysql-1:3306","dsn":"root:rootpass@tcp(mysql-1:3306)/mysql?parseTime=true","replication_user":"repl","replication_password":"replpass","expected_role":"primary"},{"id":"mysql-2","address":"mysql-2:3306","dsn":"root:rootpass@tcp(mysql-2:3306)/mysql?parseTime=true","replication_user":"repl","replication_password":"replpass","expected_role":"replica"},{"id":"mysql-3","address":"mysql-3:3306","dsn":"root:rootpass@tcp(mysql-3:3306)/mysql?parseTime=true","replication_user":"repl","replication_password":"replpass","expected_role":"replica"}]'
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
     networks: [ha]
 
 volumes:
